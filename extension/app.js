@@ -45,6 +45,7 @@ async function fetchOpenTabs() {
       title:    t.title,
       windowId: t.windowId,
       active:   t.active,
+      favIconUrl: t.favIconUrl || '',
       // Flag Tab Out's own pages so we can detect duplicate new tabs
       isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
     }));
@@ -767,7 +768,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     const safeTitle = label.replace(/"/g, '&quot;');
     let domain = '';
     try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const faviconUrl = tab.favIconUrl || (domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '');
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
@@ -848,7 +849,7 @@ function renderDomainCard(group) {
     const safeTitle = label.replace(/"/g, '&quot;');
     let domain = '';
     try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const faviconUrl = tab.favIconUrl || (domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '');
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
       <span class="chip-text">${label}</span>${dupeTag}
@@ -1030,6 +1031,67 @@ async function renderStaticDashboard() {
   await fetchOpenTabs();
   const realTabs = getRealTabs();
 
+  // --- Check groupMode setting ---
+  let groupMode = 'domain'; // 'domain' | 'window' | 'window-domain'
+  try {
+    const settingsData = await chrome.storage.local.get('settings');
+    if (settingsData.settings && settingsData.settings.groupMode) {
+      groupMode = settingsData.settings.groupMode;
+    } else if (settingsData.settings && settingsData.settings.groupByWindow) {
+      // Backward compat with old boolean toggle
+      groupMode = 'window';
+    }
+  } catch {}
+
+  // --- Group tabs ---
+  if (groupMode === 'window') {
+    // Group by window ID (flat — all tabs in a window become one card)
+    const windowMap = {};
+    for (const tab of realTabs) {
+      const key = 'window-' + tab.windowId;
+      if (!windowMap[key]) windowMap[key] = { domain: key, label: 'Window ' + tab.windowId, tabs: [], windowId: tab.windowId };
+      windowMap[key].tabs.push(tab);
+    }
+    const windowGroups = Object.values(windowMap);
+    windowGroups.forEach((g, i) => { g.label = 'Window ' + (i + 1); });
+    domainGroups = windowGroups;
+
+  } else if (groupMode === 'window-domain') {
+    // Group by window, then within each window group by domain
+    // Each domain group gets a windowLabel for rendering section headers
+    const windowBuckets = {};
+    for (const tab of realTabs) {
+      if (!windowBuckets[tab.windowId]) windowBuckets[tab.windowId] = [];
+      windowBuckets[tab.windowId].push(tab);
+    }
+
+    domainGroups = [];
+    const windowIds = Object.keys(windowBuckets);
+    windowIds.forEach((wid, winIndex) => {
+      const tabs = windowBuckets[wid];
+      const windowLabel = 'Window ' + (winIndex + 1);
+
+      // Sub-group by domain within this window
+      const subGroupMap = {};
+      for (const tab of tabs) {
+        let hostname;
+        try {
+          if (tab.url && tab.url.startsWith('file://')) {
+            hostname = 'local-files';
+          } else {
+            hostname = new URL(tab.url).hostname;
+          }
+        } catch { continue; }
+        if (!hostname) continue;
+        if (!subGroupMap[hostname]) subGroupMap[hostname] = { domain: hostname, tabs: [], windowLabel, windowId: wid };
+        subGroupMap[hostname].tabs.push(tab);
+      }
+
+      const groups = Object.values(subGroupMap).sort((a, b) => b.tabs.length - a.tabs.length);
+      domainGroups.push(...groups);
+    });
+
+  } else {
   // --- Group tabs by domain ---
   // Landing pages (Gmail inbox, Twitter home, etc.) get their own special group
   // so they can be closed together without affecting content tabs on the same domain.
@@ -1141,6 +1203,7 @@ async function renderStaticDashboard() {
 
     return b.tabs.length - a.tabs.length;
   });
+  } // end else (groupMode === 'domain')
 
   // --- Render domain cards ---
   const openTabsSection      = document.getElementById('openTabsSection');
@@ -1150,8 +1213,32 @@ async function renderStaticDashboard() {
 
   if (domainGroups.length > 0 && openTabsSection) {
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
-    openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
+
+    if (groupMode === 'window-domain') {
+      // For window-domain mode, the global count shows total windows
+      const windowCount = new Set(domainGroups.map(g => g.windowLabel)).size;
+      openTabsSectionCount.innerHTML = `${windowCount} window${windowCount !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; ${realTabs.length} tabs &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all</button>`;
+    } else {
+      const groupUnit = groupMode === 'window' ? 'window' : 'domain';
+      openTabsSectionCount.innerHTML = `${domainGroups.length} ${groupUnit}${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
+    }
+
+    // For window-domain mode, insert window section headers between groups
+    let cardsHtml = '';
+    let lastWindowLabel = null;
+    for (const g of domainGroups) {
+      if (groupMode === 'window-domain' && g.windowLabel && g.windowLabel !== lastWindowLabel) {
+        // Calculate per-window stats
+        const windowTabs = domainGroups.filter(x => x.windowLabel === g.windowLabel);
+        const windowDomainCount = windowTabs.length;
+        const windowTabCount = windowTabs.reduce((sum, x) => sum + x.tabs.length, 0);
+        const wid = g.windowId || '';
+        cardsHtml += `<div class="window-section-header">${g.windowLabel}<span class="window-section-stats">${windowDomainCount} domain${windowDomainCount !== 1 ? 's' : ''} · ${windowTabCount} tab${windowTabCount !== 1 ? 's' : ''} <button class="action-btn close-tabs" data-action="close-window-tabs" data-window-id="${wid}" style="font-size:11px;padding:2px 8px;margin-left:8px;">${ICONS.close} Close all</button></span></div>`;
+        lastWindowLabel = g.windowLabel;
+      }
+      cardsHtml += renderDomainCard(g);
+    }
+    openTabsMissionsEl.innerHTML = cardsHtml;
     openTabsSection.style.display = 'block';
   } else if (openTabsSection) {
     openTabsSection.style.display = 'none';
@@ -1159,7 +1246,7 @@ async function renderStaticDashboard() {
 
   // --- Footer stats ---
   const statTabs = document.getElementById('statTabs');
-  if (statTabs) statTabs.textContent = openTabs.length;
+  if (statTabs) statTabs.textContent = realTabs.length;
 
   // --- Check for duplicate Tab Out tabs ---
   checkTabOutDupes();
@@ -1431,6 +1518,23 @@ document.addEventListener('click', async (e) => {
     showToast('All tabs closed. Fresh start.');
     return;
   }
+
+  // ---- Close all tabs in a specific window ----
+  if (action === 'close-window-tabs') {
+    const windowId = Number(actionEl.dataset.windowId);
+    if (!windowId) return;
+    const windowTabIds = openTabs
+      .filter(t => t.windowId === windowId && t.url && !t.url.startsWith('chrome') && !t.url.startsWith('about:'))
+      .map(t => t.id);
+    if (windowTabIds.length === 0) return;
+    try {
+      await chrome.tabs.remove(windowTabIds);
+    } catch {}
+    playCloseSound();
+    showToast(`Closed ${windowTabIds.length} tab${windowTabIds.length !== 1 ? 's' : ''} in window.`);
+    setTimeout(() => renderDashboard(), 300);
+    return;
+  }
 });
 
 // ---- Archive toggle — expand/collapse the archive section ----
@@ -1477,6 +1581,76 @@ document.addEventListener('input', async (e) => {
 
 
 /* ----------------------------------------------------------------
+   SETTINGS PANEL — New tab mode toggle
+   ---------------------------------------------------------------- */
+
+// Initialize the settings panel: load stored preference and wire up events
+async function initSettingsPanel() {
+  const settingsBtn = document.getElementById('settingsBtn');
+  const settingsPanel = document.getElementById('settingsPanel');
+  const toggle = document.getElementById('newTabModeToggle');
+  const groupModeSelect = document.getElementById('groupModeSelect');
+  if (!settingsBtn || !settingsPanel || !toggle) return;
+
+  // Load current settings
+  try {
+    const data = await chrome.storage.local.get('settings');
+    const settings = data.settings || { newTabMode: true };
+    toggle.checked = settings.newTabMode !== false;
+    if (groupModeSelect) {
+      groupModeSelect.value = settings.groupMode || (settings.groupByWindow ? 'window' : 'domain');
+    }
+  } catch {
+    toggle.checked = true;
+    if (groupModeSelect) groupModeSelect.value = 'domain';
+  }
+
+  // Toggle the panel on gear click
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isOpen = settingsPanel.style.display !== 'none';
+    settingsPanel.style.display = isOpen ? 'none' : 'block';
+  });
+
+  // Save setting when newTabMode toggle changes
+  toggle.addEventListener('change', async () => {
+    try {
+      const data = await chrome.storage.local.get('settings');
+      const settings = data.settings || {};
+      settings.newTabMode = toggle.checked;
+      await chrome.storage.local.set({ settings });
+    } catch (err) {
+      console.warn('[tab-out] Failed to save settings:', err);
+    }
+  });
+
+  // Save setting when groupMode select changes, then re-render
+  if (groupModeSelect) {
+    groupModeSelect.addEventListener('change', async () => {
+      try {
+        const data = await chrome.storage.local.get('settings');
+        const settings = data.settings || {};
+        settings.groupMode = groupModeSelect.value;
+        delete settings.groupByWindow; // Clean up old key
+        await chrome.storage.local.set({ settings });
+        renderDashboard();
+      } catch (err) {
+        console.warn('[tab-out] Failed to save settings:', err);
+      }
+    });
+  }
+
+  // Close panel when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!settingsPanel.contains(e.target) && e.target !== settingsBtn && !settingsBtn.contains(e.target)) {
+      settingsPanel.style.display = 'none';
+    }
+  });
+}
+
+
+/* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
 renderDashboard();
+initSettingsPanel();
