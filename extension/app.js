@@ -1205,6 +1205,14 @@ async function renderStaticDashboard() {
   });
   } // end else (groupMode === 'domain')
 
+  // --- Calculate global duplicate count ---
+  const globalUrlCounts = {};
+  for (const tab of realTabs) {
+    globalUrlCounts[tab.url] = (globalUrlCounts[tab.url] || 0) + 1;
+  }
+  const globalDupeUrls = Object.entries(globalUrlCounts).filter(([, c]) => c > 1);
+  const globalDupeCount = globalDupeUrls.reduce((s, [, c]) => s + c - 1, 0);
+
   // --- Render domain cards ---
   const openTabsSection      = document.getElementById('openTabsSection');
   const openTabsMissionsEl   = document.getElementById('openTabsMissions');
@@ -1214,13 +1222,17 @@ async function renderStaticDashboard() {
   if (domainGroups.length > 0 && openTabsSection) {
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
 
+    // Dedup button HTML (only shown if duplicates exist)
+    const dedupBtn = globalDupeCount > 0
+      ? ` <button class="action-btn dedup-all-btn" data-action="dedup-all-tabs" data-dupe-urls="${globalDupeUrls.map(([url]) => encodeURIComponent(url)).join(',')}" style="font-size:11px;padding:3px 10px;border-color:rgba(200,113,58,0.3);color:var(--accent-amber);background:rgba(200,113,58,0.04);">${ICONS.close} Close ${globalDupeCount} duplicate${globalDupeCount !== 1 ? 's' : ''}</button>`
+      : '';
+
     if (groupMode === 'window-domain') {
-      // For window-domain mode, the global count shows total windows
       const windowCount = new Set(domainGroups.map(g => g.windowLabel)).size;
-      openTabsSectionCount.innerHTML = `${windowCount} window${windowCount !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; ${realTabs.length} tabs &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all</button>`;
+      openTabsSectionCount.innerHTML = `${windowCount} window${windowCount !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; ${realTabs.length} tabs &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all</button>${dedupBtn}`;
     } else {
       const groupUnit = groupMode === 'window' ? 'window' : 'domain';
-      openTabsSectionCount.innerHTML = `${domainGroups.length} ${groupUnit}${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
+      openTabsSectionCount.innerHTML = `${domainGroups.length} ${groupUnit}${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>${dedupBtn}`;
     }
 
     // For window-domain mode, insert window section headers between groups
@@ -1535,6 +1547,19 @@ document.addEventListener('click', async (e) => {
     setTimeout(() => renderDashboard(), 300);
     return;
   }
+
+  // ---- Dedup ALL duplicate tabs across all groups ----
+  if (action === 'dedup-all-tabs') {
+    const urlsEncoded = actionEl.dataset.dupeUrls || '';
+    const urls = urlsEncoded.split(',').map(u => decodeURIComponent(u)).filter(Boolean);
+    if (urls.length === 0) return;
+
+    await closeDuplicateTabs(urls, true);
+    playCloseSound();
+    showToast('Closed all duplicates, kept one copy each');
+    setTimeout(() => renderDashboard(), 300);
+    return;
+  }
 });
 
 // ---- Archive toggle — expand/collapse the archive section ----
@@ -1584,25 +1609,31 @@ document.addEventListener('input', async (e) => {
    SETTINGS PANEL — New tab mode toggle
    ---------------------------------------------------------------- */
 
-// Initialize the settings panel: load stored preference and wire up events
+// Initialize the settings panel and group mode buttons: load stored preference and wire up events
 async function initSettingsPanel() {
   const settingsBtn = document.getElementById('settingsBtn');
   const settingsPanel = document.getElementById('settingsPanel');
   const toggle = document.getElementById('newTabModeToggle');
-  const groupModeSelect = document.getElementById('groupModeSelect');
+  const groupModeBtns = document.getElementById('groupModeBtns');
   if (!settingsBtn || !settingsPanel || !toggle) return;
 
   // Load current settings
+  let currentGroupMode = 'domain';
   try {
     const data = await chrome.storage.local.get('settings');
     const settings = data.settings || { newTabMode: true };
     toggle.checked = settings.newTabMode !== false;
-    if (groupModeSelect) {
-      groupModeSelect.value = settings.groupMode || (settings.groupByWindow ? 'window' : 'domain');
-    }
+    currentGroupMode = settings.groupMode || (settings.groupByWindow ? 'window' : 'domain');
   } catch {
     toggle.checked = true;
-    if (groupModeSelect) groupModeSelect.value = 'domain';
+    currentGroupMode = 'domain';
+  }
+
+  // Set active button based on loaded setting
+  if (groupModeBtns) {
+    groupModeBtns.querySelectorAll('.group-mode-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.mode === currentGroupMode);
+    });
   }
 
   // Toggle the panel on gear click
@@ -1624,13 +1655,23 @@ async function initSettingsPanel() {
     }
   });
 
-  // Save setting when groupMode select changes, then re-render
-  if (groupModeSelect) {
-    groupModeSelect.addEventListener('change', async () => {
+  // Group mode button clicks — switch active state, save, and re-render
+  if (groupModeBtns) {
+    groupModeBtns.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.group-mode-btn');
+      if (!btn) return;
+      const mode = btn.dataset.mode;
+      if (!mode) return;
+
+      // Update active state
+      groupModeBtns.querySelectorAll('.group-mode-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      // Save and re-render
       try {
         const data = await chrome.storage.local.get('settings');
         const settings = data.settings || {};
-        settings.groupMode = groupModeSelect.value;
+        settings.groupMode = mode;
         delete settings.groupByWindow; // Clean up old key
         await chrome.storage.local.set({ settings });
         renderDashboard();
