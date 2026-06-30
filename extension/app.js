@@ -699,6 +699,7 @@ function smartTitle(title, url) {
 const ICONS = {
   tabs:    `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8.25V18a2.25 2.25 0 0 0 2.25 2.25h13.5A2.25 2.25 0 0 0 21 18V8.25m-18 0V6a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 6v2.25m-18 0h18" /></svg>`,
   close:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>`,
+  dedup:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>`,
   archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
   focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
 };
@@ -801,7 +802,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
  * Builds the HTML for one domain group card.
  * group = { domain: string, tabs: [{ url, title, id, windowId, active }] }
  */
-function renderDomainCard(group) {
+function renderDomainCard(group, showTabCounts = true) {
   const tabs      = group.tabs || [];
   const tabCount  = tabs.length;
   const isLanding = group.domain === '__landing-pages__';
@@ -814,10 +815,12 @@ function renderDomainCard(group) {
   const hasDupes   = dupeUrls.length > 0;
   const totalExtras = dupeUrls.reduce((s, [, c]) => s + c - 1, 0);
 
-  const tabBadge = `<span class="open-tabs-badge">
-    ${ICONS.tabs}
-    ${tabCount} tab${tabCount !== 1 ? 's' : ''} open
-  </span>`;
+  const tabBadge = showTabCounts
+    ? `<span class="open-tabs-badge">
+        ${ICONS.tabs}
+        ${tabCount} tab${tabCount !== 1 ? 's' : ''} open
+      </span>`
+    : '';
 
   const dupeBadge = hasDupes
     ? `<span class="open-tabs-badge" style="color:var(--accent-amber);background:rgba(200,113,58,0.08);">
@@ -864,31 +867,25 @@ function renderDomainCard(group) {
     </div>`;
   }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts) : '');
 
-  let actionsHtml = `
-    <button class="action-btn close-tabs" data-action="close-domain-tabs" data-domain-id="${stableId}">
-      ${ICONS.close}
-      Close all ${tabCount} tab${tabCount !== 1 ? 's' : ''}
-    </button>`;
-
-  if (hasDupes) {
-    const dupeUrlsEncoded = dupeUrls.map(([url]) => encodeURIComponent(url)).join(',');
-    actionsHtml += `
-      <button class="action-btn" data-action="dedup-keep-one" data-dupe-urls="${dupeUrlsEncoded}">
-        Close ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}
-      </button>`;
-  }
+  const topActionsHtml = `
+    <div class="card-top-actions">
+      ${hasDupes ? `<button class="card-top-action dedup" data-action="dedup-keep-one" data-dupe-urls="${dupeUrls.map(([url]) => encodeURIComponent(url)).join(',')}" title="Close ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}">${ICONS.dedup}</button>` : ''}
+      <button class="card-top-action close" data-action="close-domain-tabs" data-domain-id="${stableId}" title="Close all ${tabCount} tab${tabCount !== 1 ? 's' : ''}">${ICONS.close}</button>
+    </div>`;
 
   return `
     <div class="mission-card domain-card ${hasDupes ? 'has-amber-bar' : 'has-neutral-bar'}" data-domain-id="${stableId}">
       <div class="status-bar"></div>
       <div class="mission-content">
         <div class="mission-top">
-          <span class="mission-name">${isLanding ? 'Homepages' : (group.label || friendlyDomain(group.domain))}</span>
-          ${tabBadge}
-          ${dupeBadge}
+          <div class="mission-top-left">
+            <span class="mission-name">${isLanding ? 'Homepages' : (group.label || friendlyDomain(group.domain))}</span>
+            ${tabBadge}
+            ${dupeBadge}
+          </div>
+          ${topActionsHtml}
         </div>
         <div class="mission-pages">${pageChips}</div>
-        <div class="actions">${actionsHtml}</div>
       </div>
       <div class="mission-meta">
         <div class="mission-page-count">${tabCount}</div>
@@ -1033,6 +1030,7 @@ async function renderStaticDashboard() {
 
   // --- Check groupMode setting ---
   let groupMode = 'domain'; // 'domain' | 'window' | 'window-domain'
+  let showTabCounts = true;
   try {
     const settingsData = await chrome.storage.local.get('settings');
     if (settingsData.settings && settingsData.settings.groupMode) {
@@ -1040,6 +1038,9 @@ async function renderStaticDashboard() {
     } else if (settingsData.settings && settingsData.settings.groupByWindow) {
       // Backward compat with old boolean toggle
       groupMode = 'window';
+    }
+    if (settingsData.settings && settingsData.settings.showTabCounts === false) {
+      showTabCounts = false;
     }
   } catch {}
 
@@ -1248,7 +1249,7 @@ async function renderStaticDashboard() {
         cardsHtml += `<div class="window-section-header">${g.windowLabel}<span class="window-section-stats">${windowDomainCount} domain${windowDomainCount !== 1 ? 's' : ''} · ${windowTabCount} tab${windowTabCount !== 1 ? 's' : ''} <button class="action-btn close-tabs" data-action="close-window-tabs" data-window-id="${wid}" style="font-size:11px;padding:2px 8px;margin-left:8px;">${ICONS.close} Close all</button></span></div>`;
         lastWindowLabel = g.windowLabel;
       }
-      cardsHtml += renderDomainCard(g);
+      cardsHtml += renderDomainCard(g, showTabCounts);
     }
     openTabsMissionsEl.innerHTML = cardsHtml;
     openTabsSection.style.display = 'block';
@@ -1614,6 +1615,7 @@ async function initSettingsPanel() {
   const settingsBtn = document.getElementById('settingsBtn');
   const settingsPanel = document.getElementById('settingsPanel');
   const toggle = document.getElementById('newTabModeToggle');
+  const showTabCountsToggle = document.getElementById('showTabCountsToggle');
   const groupModeBtns = document.getElementById('groupModeBtns');
   if (!settingsBtn || !settingsPanel || !toggle) return;
 
@@ -1623,9 +1625,13 @@ async function initSettingsPanel() {
     const data = await chrome.storage.local.get('settings');
     const settings = data.settings || { newTabMode: true };
     toggle.checked = settings.newTabMode !== false;
+    if (showTabCountsToggle) {
+      showTabCountsToggle.checked = settings.showTabCounts !== false;
+    }
     currentGroupMode = settings.groupMode || (settings.groupByWindow ? 'window' : 'domain');
   } catch {
     toggle.checked = true;
+    if (showTabCountsToggle) showTabCountsToggle.checked = true;
     currentGroupMode = 'domain';
   }
 
@@ -1654,6 +1660,21 @@ async function initSettingsPanel() {
       console.warn('[tab-out] Failed to save settings:', err);
     }
   });
+
+  // Save setting when showTabCounts toggle changes, then re-render
+  if (showTabCountsToggle) {
+    showTabCountsToggle.addEventListener('change', async () => {
+      try {
+        const data = await chrome.storage.local.get('settings');
+        const settings = data.settings || {};
+        settings.showTabCounts = showTabCountsToggle.checked;
+        await chrome.storage.local.set({ settings });
+        renderDashboard();
+      } catch (err) {
+        console.warn('[tab-out] Failed to save settings:', err);
+      }
+    });
+  }
 
   // Group mode button clicks — switch active state, save, and re-render
   if (groupModeBtns) {
